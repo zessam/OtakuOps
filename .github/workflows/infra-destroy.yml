@@ -21,6 +21,7 @@ jobs:
   destroy:
     name: Terraform Destroy
     runs-on: ubuntu-latest
+    environment: production # auth secrets are scoped to this environment
     defaults:
       run:
         working-directory: terraform
