@@ -126,9 +126,9 @@ the note below.
 
 ## DevSecOps pipeline (`infra-build`)
 
-Three stages: five **parallel** security gates, then plan, then a gated apply.
+Four stages: parallel source gates → plan → OPA policy → gated apply.
 
-**Stage 1 — parallel gates (all must pass before plan):**
+**Stage 1 — parallel source gates (all must pass before plan):**
 
 | Job | What runs | Blocks? |
 |-----|-----------|---------|
@@ -136,13 +136,14 @@ Three stages: five **parallel** security gates, then plan, then a gated apply.
 | `tfsec` | tfsec IaC scan (SARIF → Security tab) | findings surfaced |
 | `checkov` | Checkov IaC scan (SARIF → Security tab) | findings surfaced |
 | `gitleaks` | secret scan | **yes** on a hit |
-| `opa` | **OPA/conftest** against the Terraform HCL (`--parser hcl2`) | **yes** on violation |
 
-**Stage 2 — `plan`** — `needs: [validate, tfsec, checkov, gitleaks, opa]`; authenticated `terraform plan`, uploads the plan artifact.
+**Stage 2 — `plan`** — `needs: [validate, tfsec, checkov, gitleaks]`; authenticated `terraform plan`, uploads `tfplan` + `plan.json`.
 
-**Stage 3 — `apply`** — queued after plan; **waits for approval** on `production` (skipped only on PRs).
+**Stage 3 — `policy`** — **OPA/conftest against the plan JSON** (`needs: plan`). Runs on the resolved, version-stable plan schema — **hard-blocks** on violation.
 
-- **Any push touching `terraform/`** runs the five gates → `plan` → `apply` (which **waits for your approval**).
+**Stage 4 — `apply`** — queued after `policy`; **waits for approval** on `production` (skipped only on PRs).
+
+- **Any push touching `terraform/`** runs the gates → `plan` → `policy` → `apply` (which **waits for your approval**).
 - **Pull requests** run everything except `apply`.
 - **`Infra Destroy`** is a separate manual workflow that also requires the `production` approval **and** typing `destroy`.
 - IaC findings (tfsec/Checkov) appear under the repo's **Security → Code scanning** tab.
@@ -155,18 +156,21 @@ Three stages: five **parallel** security gates, then plan, then a gated apply.
 
 ### Policy-as-code (OPA / conftest)
 
-Rego policies live in [`policy/`](policy/) and run **before plan** — conftest
-evaluates the Terraform **HCL source** (`--parser hcl2`), so no cloud access or
-plan is needed. They **hard-block** the pipeline on violation. Current rules:
+Rego policies live in [`policy/`](policy/) and run **after plan**, against the
+`terraform show -json` output. The plan JSON is a stable, fully-resolved schema
+(HCL parsing varies between conftest versions), so this is the robust place for
+policy. They **hard-block** the pipeline on violation. Current rules:
 
 - Buckets must enforce `public_access_prevention` and uniform bucket-level access.
 - Node pools must use a dedicated SA, shielded secure boot, and `GKE_METADATA`.
 - Cluster must enable Workload Identity, Shielded Nodes, and private nodes.
 
-Run them locally:
+Run them locally against a plan:
 
 ```bash
-conftest test $(find terraform -name '*.tf') --parser hcl2 -p terraform/policy
+cd terraform
+terraform plan -out=tfplan && terraform show -json tfplan > plan.json
+conftest test plan.json -p policy
 ```
 
 The Terraform is hardened to pass tfsec + Checkov cleanly; the few non-applicable

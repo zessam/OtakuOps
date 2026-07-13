@@ -1,9 +1,10 @@
 name: Infra Build
 
 # Security-gated pipeline for the GKE + GCS + Artifact Registry infra.
-# Stage 1 (parallel, shift-left gates): validate, tfsec, checkov, gitleaks, opa.
-# Stage 2: plan — depends on ALL stage-1 gates passing.
-# Stage 3: apply — queued after plan, WAITS FOR APPROVAL on `production`.
+# Stage 1 (parallel source gates): validate, tfsec, checkov, gitleaks.
+# Stage 2: plan — depends on ALL stage-1 gates.
+# Stage 3: policy — OPA/conftest against the PLAN JSON (stable, resolved schema).
+# Stage 4: apply — queued after policy, WAITS FOR APPROVAL on `production`.
 on:
   workflow_dispatch:
   push:
@@ -34,7 +35,7 @@ env:
 
 jobs:
   # ===========================================================================
-  # STAGE 1 — parallel security gates (all run before plan; plan depends on them)
+  # STAGE 1 — parallel source gates (all run before plan; plan depends on them)
   # ===========================================================================
 
   validate:
@@ -105,25 +106,13 @@ jobs:
           sudo install /tmp/gitleaks /usr/local/bin/gitleaks
           gitleaks detect --source . --redact --exit-code 1
 
-  opa:
-    name: OPA Policy (conftest)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - name: Setup conftest
-        run: |
-          curl -sSL "https://github.com/open-policy-agent/conftest/releases/download/v${CONFTEST_VERSION}/conftest_${CONFTEST_VERSION}_Linux_x86_64.tar.gz" \
-            | sudo tar -xz -C /usr/local/bin conftest
-      - name: Conftest policy check (HCL)
-        run: conftest test $(find terraform -name '*.tf') --parser hcl2 -p terraform/policy
-
   # ===========================================================================
   # STAGE 2 — plan (depends on ALL stage-1 gates)
   # ===========================================================================
   plan:
     name: Terraform Plan
     runs-on: ubuntu-latest
-    needs: [validate, tfsec, checkov, gitleaks, opa]
+    needs: [validate, tfsec, checkov, gitleaks]
     # Auth secrets + TF_STATE_BUCKET live in the `production` environment.
     environment: production
     defaults:
@@ -148,23 +137,51 @@ jobs:
         run: terraform init -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}"
 
       - name: Terraform Plan
-        run: terraform plan -input=false -out=tfplan
+        run: |
+          terraform plan -input=false -out=tfplan
+          terraform show -json tfplan > plan.json
 
-      - name: Upload plan artifact
+      - name: Upload plan artifacts
         uses: actions/upload-artifact@v4
         with:
           name: tfplan
-          path: terraform/tfplan
+          path: |
+            terraform/tfplan
+            terraform/plan.json
           retention-days: 1
 
   # ===========================================================================
-  # STAGE 3 — apply (queued after plan; WAITS FOR APPROVAL on `production`)
+  # STAGE 3 — OPA policy against the PLAN JSON (stable, fully-resolved schema)
+  # ===========================================================================
+  policy:
+    name: OPA Policy (conftest)
+    runs-on: ubuntu-latest
+    needs: plan
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Download plan artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: tfplan
+          path: plan
+
+      - name: Setup conftest
+        run: |
+          curl -sSL "https://github.com/open-policy-agent/conftest/releases/download/v${CONFTEST_VERSION}/conftest_${CONFTEST_VERSION}_Linux_x86_64.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin conftest
+
+      - name: Conftest policy check (plan JSON)
+        run: conftest test plan/plan.json -p terraform/policy
+
+  # ===========================================================================
+  # STAGE 4 — apply (queued after policy; WAITS FOR APPROVAL on `production`)
   #           Skipped only for pull_request events (never apply from a PR).
   # ===========================================================================
   apply:
     name: Terraform Apply
     runs-on: ubuntu-latest
-    needs: plan
+    needs: policy
     if: github.event_name != 'pull_request'
     environment: production # REQUIRED REVIEWERS here => apply waits for approval
     defaults:
@@ -188,7 +205,7 @@ jobs:
       - name: Terraform Init
         run: terraform init -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}"
 
-      - name: Download plan artifact
+      - name: Download plan artifacts
         uses: actions/download-artifact@v4
         with:
           name: tfplan
