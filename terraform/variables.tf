@@ -40,9 +40,9 @@ variable "app_machine_type" {
 }
 
 variable "serve_machine_type" {
-  description = "Machine type for the vLLM CPU serving pool. e2-standard-8 (8 vCPU / 32GB) comfortably runs a 3B model on CPU."
+  description = "Machine type for the vLLM CPU serving pool. e2-standard-4 (4 vCPU / 16GB) fits a 3B model on CPU and stays within the default 8-vCPU free-tier regional quota alongside the app node."
   type        = string
-  default     = "e2-standard-8"
+  default     = "e2-standard-4"
 }
 
 variable "master_authorized_cidrs" {

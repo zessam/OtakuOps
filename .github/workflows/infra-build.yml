@@ -1,10 +1,16 @@
-name: Infra Build (DevSecOps)
+name: Infra Build
 
 # Security-gated pipeline that provisions the GKE + GCS + Artifact Registry infra.
-#   - Pull requests: run scans + plan + policy checks (no apply).
-#   - Manual dispatch: run scans + plan + policy checks, then apply.
+# Runs automatically on any change under terraform/ (scan -> plan -> OPA policy).
+# Apply happens ONLY on manual dispatch and requires approval on the
+# `production` environment (add required reviewers in repo settings).
 on:
   workflow_dispatch:
+  # Fire on ANY change under terraform/ (scan + plan + policy only — never apply).
+  push:
+    paths:
+      - "terraform/**"
+      - ".github/workflows/infra-build.yml"
   pull_request:
     paths:
       - "terraform/**"
@@ -35,7 +41,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0 # gitleaks needs full history
 
@@ -63,7 +69,7 @@ jobs:
 
       - name: Upload tfsec SARIF
         if: always()
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: tfsec.sarif
           category: tfsec
@@ -80,7 +86,7 @@ jobs:
 
       - name: Upload Checkov SARIF
         if: always()
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: checkov.sarif
           category: checkov
@@ -92,19 +98,20 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # ---------------------------------------------------------------------------
-  # 2. Plan + OPA policy — authenticated plan, gated by conftest policies
+  # 2. Plan — authenticated plan against real state (runs automatically, no gate)
   # ---------------------------------------------------------------------------
   plan:
-    name: Terraform Plan + OPA
+    name: Terraform Plan
     runs-on: ubuntu-latest
     needs: security-scan
-    environment: production # auth secrets are scoped to this environment
+    # No environment here on purpose: plan must run automatically on push.
+    # Auth secrets must therefore be REPOSITORY secrets (not environment secrets).
     defaults:
       run:
         working-directory: terraform
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Authenticate to Google Cloud (WIF)
         uses: google-github-actions/auth@v2
@@ -116,46 +123,64 @@ jobs:
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      - name: Terraform Init
+        run: terraform init -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}"
+
+      - name: Terraform Plan
+        run: |
+          terraform plan -input=false -out=tfplan
+          terraform show -json tfplan > plan.json
+
+      - name: Upload plan artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan
+          path: |
+            terraform/tfplan
+            terraform/plan.json
+          retention-days: 1
+
+  # ---------------------------------------------------------------------------
+  # 3. OPA policy — conftest against the plan JSON (separate, hard-blocking job)
+  # ---------------------------------------------------------------------------
+  policy:
+    name: OPA Policy (conftest)
+    runs-on: ubuntu-latest
+    needs: plan
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Download plan artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: tfplan
+          path: plan
 
       - name: Setup conftest
         run: |
           curl -sSL "https://github.com/open-policy-agent/conftest/releases/download/v${CONFTEST_VERSION}/conftest_${CONFTEST_VERSION}_Linux_x86_64.tar.gz" \
             | sudo tar -xz -C /usr/local/bin conftest
 
-      - name: Terraform Init
-        run: terraform init -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}"
-
-      - name: Terraform Plan
-        run: terraform plan -input=false -out=tfplan
-
-      # --- Policy-as-code gate: OPA/conftest against the plan (HARD blocks) ---
-      - name: OPA policy check (conftest)
-        run: |
-          terraform show -json tfplan > plan.json
-          conftest test plan.json -p policy
-
-      - name: Upload plan artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: tfplan
-          path: terraform/tfplan
-          retention-days: 1
+      - name: Conftest policy check
+        run: conftest test plan/plan.json -p terraform/policy
 
   # ---------------------------------------------------------------------------
-  # 3. Apply — only on manual dispatch, applies the reviewed plan
+  # 4. Apply — manual dispatch only, REQUIRES approval on `production`
   # ---------------------------------------------------------------------------
   apply:
     name: Terraform Apply
     runs-on: ubuntu-latest
-    needs: plan
+    needs: policy
     if: github.event_name == 'workflow_dispatch'
-    environment: production # auth secrets are scoped to this environment
+    environment: production # add REQUIRED REVIEWERS here => manual approval gate
     defaults:
       run:
         working-directory: terraform
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Authenticate to Google Cloud (WIF)
         uses: google-github-actions/auth@v2
@@ -171,7 +196,7 @@ jobs:
       - name: Terraform Init
         run: terraform init -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}"
 
-      - name: Download plan artifact
+      - name: Download plan artifacts
         uses: actions/download-artifact@v4
         with:
           name: tfplan

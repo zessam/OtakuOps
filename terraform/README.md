@@ -5,7 +5,7 @@ Provisions everything needed to run the Anime Recommender + vLLM on GKE.
 upgrade or GPU quota. vLLM serves a small model (Qwen2.5-3B) on CPU.
 
 - GKE cluster (zonal, VPC-native, Workload Identity)
-- app-pool (always-on, `e2-medium`) + serve-pool (vLLM on CPU, `e2-standard-8`, scales 0→1)
+- app-pool (always-on, `e2-medium`, fixed 1 node) + serve-pool (vLLM on CPU, `e2-standard-4`, scales 0→1)
 - Artifact Registry Docker repo (app image)
 - GCS bucket for model weights (optional — vLLM can also pull from HF Hub directly)
 - Workload-identity service account so pods can read the bucket
@@ -94,12 +94,24 @@ gcloud iam workload-identity-pools providers describe "$PROVIDER" \
 
 | Name | Kind | How to get it |
 |------|------|---------------|
-| `WORKLOAD_PROVIDER` | secret | output of step **3d** (`projects/<num>/locations/global/workloadIdentityPools/github-pool/providers/github-provider`) |
-| `SERVICE_ACCOUNT` | secret | the SA email, e.g. `terraform-ci@<project>.iam.gserviceaccount.com` |
-| `GCP_PROJECT_ID` | secret | your project ID (`gcloud config get-value project`) |
-| `TF_STATE_BUCKET` | **variable** | the state bucket from step 1, e.g. `<project>-tfstate` |
+| `WORKLOAD_PROVIDER` | **repository** secret | output of step **3d** (`projects/<num>/locations/global/workloadIdentityPools/github-pool/providers/github-provider`) |
+| `SERVICE_ACCOUNT` | **repository** secret | the SA email, e.g. `terraform-ci@<project>.iam.gserviceaccount.com` |
+| `GCP_PROJECT_ID` | **repository** secret | your project ID (`gcloud config get-value project`) |
+| `TF_STATE_BUCKET` | **repository variable** | the state bucket from step 1, e.g. `<project>-tfstate` |
+
+> These must be **repository** secrets (not *environment* secrets). The `plan`
+> and `policy` jobs run automatically on every push and need them **without** the
+> approval gate. Environment-scoped secrets would force those jobs to wait for
+> approval too.
 
 > No `GCP_SA_KEY` — WIF is keyless, so there is no long-lived credential to leak.
+
+### 5. Create the approval gate
+
+Repo → **Settings → Environments → New environment → `production`** → enable
+**Required reviewers** and add yourself. The `apply` job and the whole
+`Infra Destroy` workflow are pinned to this environment, so **both pause and wait
+for a human to click *Approve*** before they run. Plan/policy are not gated.
 
 ---
 
@@ -107,14 +119,18 @@ gcloud iam workload-identity-pools providers describe "$PROVIDER" \
 
 The apply workflow is security-gated:
 
-| Stage | What runs | Blocks? |
-|-------|-----------|---------|
-| `security-scan` | `terraform fmt`/`validate`, **tfsec** + **Checkov** (IaC, SARIF → Security tab), **gitleaks** (secrets) | gitleaks: **yes**; IaC findings: surfaced, not blocking |
-| `plan` + OPA | authenticated `terraform plan`, then **OPA/conftest** policy check against the plan JSON; uploads plan artifact | plan failure **and** any policy violation: **yes** |
-| `apply` | applies the saved plan | manual dispatch only |
+Four separate jobs, run in order:
 
-- On **pull requests** it runs scan + plan + policy (no apply).
-- On **manual dispatch** it runs scan + plan + policy + apply.
+| Job | What runs | Gate |
+|-----|-----------|------|
+| `security-scan` | `terraform fmt`/`validate`, **tfsec** + **Checkov** (SARIF → Security tab), **gitleaks** | gitleaks blocks; IaC findings surfaced |
+| `plan` | authenticated `terraform plan`, uploads plan artifact | runs automatically, blocks on failure |
+| `policy` | **OPA/conftest** against the plan JSON | runs automatically, **hard-blocks** on violation |
+| `apply` | applies the saved plan | **manual dispatch + approval on `production`** |
+
+- **Any push / PR touching `terraform/`** automatically runs `security-scan → plan → policy` (no apply).
+- **`apply`** runs only on manual dispatch **and** waits for approval on the `production` environment.
+- **`Infra Destroy`** is a separate manual workflow that also requires the `production` approval **and** typing `destroy`.
 - IaC findings (tfsec/Checkov) appear under the repo's **Security → Code scanning** tab.
 
 ### Policy-as-code (OPA / conftest)
@@ -182,6 +198,6 @@ Typical next steps (not managed by this Terraform):
 ## Cost discipline (free tier)
 
 - The serve pool scales to 0 — **scale the vLLM Deployment to 0 replicas when
-  not testing** so the `e2-standard-8` node drains and billing stops.
+  not testing** so the `e2-standard-4` node drains and billing stops.
 - Run **Infra Destroy** (or `terraform destroy`) between work sessions. State is
   remote, so you can rebuild anytime.

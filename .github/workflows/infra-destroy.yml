@@ -21,7 +21,7 @@ jobs:
   destroy:
     name: Terraform Destroy
     runs-on: ubuntu-latest
-    environment: production # auth secrets are scoped to this environment
+    environment: production # add REQUIRED REVIEWERS here => manual approval gate
     defaults:
       run:
         working-directory: terraform
@@ -34,7 +34,7 @@ jobs:
           exit 1
 
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Authenticate to Google Cloud (WIF)
         uses: google-github-actions/auth@v2
