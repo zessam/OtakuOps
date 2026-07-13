@@ -24,10 +24,12 @@ spec:
               # local-completions uses when talking to an OpenAI-compatible server.
               pip install --quiet "lm-eval[api]" transformers
               ROUTER=http://vllm-router-service.default.svc.cluster.local:80/v1/completions
+              # CPU is slow: keep the sample count tiny and cap generation length,
+              # and let the engine batch a few concurrent requests.
               lm_eval --model local-completions \
-                --model_args "base_url=${ROUTER},model=Qwen/Qwen2.5-3B-Instruct,num_concurrent=1,tokenized_requests=False" \
+                --model_args "base_url=${ROUTER},model=Qwen/Qwen2.5-3B-Instruct,num_concurrent=4,tokenized_requests=False,max_gen_toks=256" \
                 --tasks gsm8k \
-                --limit 20 \
+                --limit 5 \
                 --output_path /tmp/lmeval
               # Parse results and push each score to the Pushgateway.
               python - <<'PY'

@@ -21,14 +21,13 @@ spec:
             - |
               set -e
               pip install --quiet guidellm
-              # newer GuideLLM: `benchmark` is a group; the `run` subcommand takes
-              # the options. --target is the OpenAI base URL of the ROUTER.
-              guidellm benchmark run \
-                --target http://vllm-router-service.default.svc.cluster.local:80 \
-                --model Qwen/Qwen2.5-3B-Instruct \
-                --rate-type sweep \
-                --max-seconds 120 \
-                --data "prompt_tokens=128,output_tokens=128" \
+              # Current GuideLLM CLI: `guidellm run` with kind=... options.
+              # constant rate=1 + small tokens keeps it light on the CPU model.
+              guidellm run \
+                --backend "kind=openai_http,target=http://vllm-router-service.default.svc.cluster.local:80" \
+                --profile "kind=constant,rate=1" \
+                --constraint "kind=max_duration,seconds=60" \
+                --data "kind=synthetic_text,prompt_tokens=64,output_tokens=64" \
                 --output-path /tmp/guidellm.json
               echo "=== GuideLLM finished. Its report is above; the load it generated"
               echo "=== is visible on the Grafana vLLM serving dashboard (throughput/TTFT/latency)."

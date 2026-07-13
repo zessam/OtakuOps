@@ -1,4 +1,4 @@
-name: App Deploy (DevSecOps)
+name: App Deploy
 
 # Secure CI/CD for the Anime Recommender Streamlit app.
 #   push / PR (app sources, dockerfile, k8s/app/**): source gates -> build+scan -> manifest policy.

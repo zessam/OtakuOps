@@ -34,7 +34,7 @@ OtakuOps is an end-to-end **LLMOps / LLMSecOps** reference platform. The user-fa
 At the surface, a user types a preference — *"light-hearted anime with a school setting"* — and gets three tailored recommendations with plot summaries and reasons. Under the hood:
 
 - **RAG**, not fine-tuning. Anime synopses are embedded with `all-MiniLM-L6-v2`, stored in **Chroma**, and retrieved at query time to ground a `RetrievalQA` chain.
-- **Self-hosted inference.** The default LLM is **Qwen2.5-3B-Instruct** served by the **vLLM production-stack** on GKE. A hosted **Groq** backend is a drop-in fallback for fast local UI iteration.
+- **Self-hosted inference.** The LLM is **Qwen2.5-3B-Instruct** served by the **vLLM production-stack** on GKE. The same stack runs locally on **minikube** (with a lightweight SLM) for fast, cluster-realistic iteration before touching the cloud.
 - **Everything is code.** The cluster, network, storage, and registry are provisioned by **Terraform**; every deploy runs through a security-gated GitHub Actions pipeline.
 
 ```mermaid
@@ -48,7 +48,7 @@ mindmap
     Serving
       vLLM production-stack
       Qwen2.5-3B-Instruct
-      Groq fallback
+      minikube local trial
     Infrastructure
       Terraform
       GKE + VPC + Cloud NAT
@@ -97,12 +97,10 @@ flowchart TB
 
     gcs[("GCS<br/>model bucket")]
     hf[("Hugging Face Hub")]
-    groq["Groq API<br/>(fallback)"]
 
     user -->|query| ui --> pipe
     pipe -->|retrieve context| chroma
     pipe -->|chat completion| router --> engine
-    pipe -.->|LLM_PROVIDER=groq| groq
     engine -->|pull weights| hf
     engine -.->|cache| gcs
 
@@ -263,9 +261,10 @@ See [`k8s/observability/README.md`](k8s/observability/README.md) for PromQL pane
 | **Orchestration**  | LangChain (`RetrievalQA`)                                              |
 | **Vector store**   | Chroma                                                                 |
 | **Embeddings**     | `sentence-transformers/all-MiniLM-L6-v2`                               |
-| **LLM (default)**  | Qwen2.5-3B-Instruct via vLLM production-stack                          |
-| **LLM (fallback)** | Groq (`llama-3.1-8b-instant`)                                          |
+| **LLM (cloud)**    | Qwen2.5-3B-Instruct via vLLM production-stack                          |
+| **LLM (local)**    | Lightweight SLM via vLLM on minikube                                   |
 | **Cloud**          | Google Kubernetes Engine (GKE)                                         |
+| **Local cluster**  | minikube (CPU, self-hosted vLLM)                                       |
 | **IaC**            | Terraform (modular: network · gke · storage · artifact_registry)    |
 | **CI/CD**          | GitHub Actions + Workload Identity Federation                          |
 | **Security**       | tfsec · Checkov · gitleaks · OPA/conftest · 8-tool LLMSecOps suite |
@@ -281,7 +280,7 @@ See [`k8s/observability/README.md`](k8s/observability/README.md) for PromQL pane
 ├── src/                  # RAG core: data_loader, vector_store, llm_provider,
 │                         #   prompt_template, recommender
 ├── pipeline/             # build_pipeline (offline) + pipeline (runtime)
-├── config/               # env-driven config (LLM provider, vLLM/Groq settings)
+├── config/               # env-driven config (LLM provider, vLLM settings)
 ├── data/                 # anime datasets (raw + processed)
 ├── utils/                # logger + custom exceptions
 ├── terraform/            # modular IaC + OPA policies + CI backend
@@ -301,22 +300,22 @@ See [`k8s/observability/README.md`](k8s/observability/README.md) for PromQL pane
 
 ## Getting started
 
-### Local (fastest — Groq backend, no cluster needed)
+### Local trial (minikube — self-hosted vLLM, no cloud needed)
+
+Runs the whole thing on your machine: a CPU vLLM server (lightweight SLM) and the app,
+both inside a local minikube cluster — the same architecture as GKE, in miniature.
 
 ```bash
-python -m venv venv && source venv/bin/activate   # Windows: venv\Scripts\activate
-pip install -r requirements.txt
-pip install -e .
-
-# point the app at the hosted fallback for quick iteration
-export LLM_PROVIDER=groq
-export GROQ_API_KEY=<your-key>
-
-# 1) build the vector store (one-off)
+# build the vector store (one-off) — see build_pipeline for details
 python pipeline/build_pipeline.py
 
-# 2) run the UI
-streamlit run app/app.py
+# start minikube, build the app image into it, then deploy vLLM + app
+minikube start
+eval "$(minikube docker-env)" && docker build -t anime-rec-app:latest .
+kubectl apply -f k8s-local/
+
+# open the UI
+minikube service anime-rec-service
 ```
 
 ### Self-hosted (vLLM on GKE)
