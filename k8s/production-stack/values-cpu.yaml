@@ -69,7 +69,7 @@ routerSpec:
   requestStatsWindow: 60
   resources:
     requests:
-      cpu: "250m"
-      memory: "512Mi"
+      cpu: "300m"
+      memory: "1Gi" # chart default is 1000Mi; 512Mi OOM-kills the router
     limits:
-      memory: "512Mi"
+      memory: "1Gi"
