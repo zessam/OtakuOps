@@ -1,12 +1,11 @@
 name: Infra Build
 
-# Security-gated pipeline that provisions the GKE + GCS + Artifact Registry infra.
-# Runs automatically on any change under terraform/ (scan -> plan -> OPA policy).
-# Apply happens ONLY on manual dispatch and requires approval on the
-# `production` environment (add required reviewers in repo settings).
+# Security-gated pipeline for the GKE + GCS + Artifact Registry infra.
+# Stage 1 (parallel, shift-left gates): validate, tfsec, checkov, gitleaks, opa.
+# Stage 2: plan — depends on ALL stage-1 gates passing.
+# Stage 3: apply — queued after plan, WAITS FOR APPROVAL on `production`.
 on:
   workflow_dispatch:
-  # Fire on ANY change under terraform/ (scan + plan + policy only — never apply).
   push:
     paths:
       - "terraform/**"
@@ -31,42 +30,40 @@ env:
   TF_VAR_project_id: ${{ secrets.GCP_PROJECT_ID }}
   TERRAFORM_VERSION: 1.9.8
   CONFTEST_VERSION: 0.56.0
+  GITLEAKS_VERSION: 8.18.4
 
 jobs:
-  # ---------------------------------------------------------------------------
-  # 1. Security scanning — static analysis of the IaC + secret detection
-  # ---------------------------------------------------------------------------
-  security-scan:
-    name: Security Scan
+  # ===========================================================================
+  # STAGE 1 — parallel security gates (all run before plan; plan depends on them)
+  # ===========================================================================
+
+  validate:
+    name: Terraform Validate
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-        with:
-          fetch-depth: 0 # gitleaks needs full history
-
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: ${{ env.TERRAFORM_VERSION }}
-
-      - name: Terraform fmt
-        working-directory: terraform
-        run: terraform fmt -check -recursive
-
-      - name: Terraform validate
+      - uses: actions/checkout@v5
+      - name: Install Terraform
+        run: |
+          curl -fsSL "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_amd64.zip" -o /tmp/terraform.zip
+          unzip -o /tmp/terraform.zip -d /tmp
+          sudo install /tmp/terraform /usr/local/bin/terraform
+      - name: fmt + validate
         working-directory: terraform
         run: |
+          terraform fmt -check -recursive
           terraform init -backend=false -input=false
           terraform validate
 
-      # --- IaC scanning: tfsec (findings surfaced to the Security tab) ---
+  tfsec:
+    name: tfsec (IaC scan)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
       - name: tfsec
         uses: aquasecurity/tfsec-sarif-action@v0.1.4
         with:
           working_directory: terraform
           sarif_file: tfsec.sarif
-
       - name: Upload tfsec SARIF
         if: always()
         uses: github/codeql-action/upload-sarif@v4
@@ -74,7 +71,11 @@ jobs:
           sarif_file: tfsec.sarif
           category: tfsec
 
-      # --- IaC scanning: Checkov ---
+  checkov:
+    name: Checkov (IaC scan)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
       - name: Checkov
         uses: bridgecrewio/checkov-action@v12
         with:
@@ -82,8 +83,7 @@ jobs:
           framework: terraform
           output_format: cli,sarif
           output_file_path: console,checkov.sarif
-          soft_fail: true # findings are surfaced, not hard-blocking
-
+          soft_fail: true # findings surfaced, not hard-blocking
       - name: Upload Checkov SARIF
         if: always()
         uses: github/codeql-action/upload-sarif@v4
@@ -91,28 +91,46 @@ jobs:
           sarif_file: checkov.sarif
           category: checkov
 
-      # --- Secret scanning: gitleaks (HARD blocks the pipeline on a hit) ---
+  gitleaks:
+    name: gitleaks (secret scan)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0 # full history for secret scanning
       - name: gitleaks
-        uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          curl -fsSL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" -o /tmp/gitleaks.tgz
+          tar -xzf /tmp/gitleaks.tgz -C /tmp gitleaks
+          sudo install /tmp/gitleaks /usr/local/bin/gitleaks
+          gitleaks detect --source . --redact --exit-code 1
 
-  # ---------------------------------------------------------------------------
-  # 2. Plan — authenticated plan against real state (runs automatically, no gate)
-  # ---------------------------------------------------------------------------
+  opa:
+    name: OPA Policy (conftest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Setup conftest
+        run: |
+          curl -sSL "https://github.com/open-policy-agent/conftest/releases/download/v${CONFTEST_VERSION}/conftest_${CONFTEST_VERSION}_Linux_x86_64.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin conftest
+      - name: Conftest policy check (HCL)
+        run: conftest test $(find terraform -name '*.tf') --parser hcl2 -p terraform/policy
+
+  # ===========================================================================
+  # STAGE 2 — plan (depends on ALL stage-1 gates)
+  # ===========================================================================
   plan:
     name: Terraform Plan
     runs-on: ubuntu-latest
-    needs: security-scan
-    # The GCP auth secrets and TF_STATE_BUCKET live in the `production`
-    # environment, so this job must reference it to read them.
+    needs: [validate, tfsec, checkov, gitleaks, opa]
+    # Auth secrets + TF_STATE_BUCKET live in the `production` environment.
     environment: production
     defaults:
       run:
         working-directory: terraform
     steps:
-      - name: Checkout
-        uses: actions/checkout@v5
+      - uses: actions/checkout@v5
 
       - name: Authenticate to Google Cloud (WIF)
         uses: google-github-actions/auth@v2
@@ -120,68 +138,40 @@ jobs:
           workload_identity_provider: ${{ secrets.WORKLOAD_PROVIDER }}
           service_account: ${{ secrets.SERVICE_ACCOUNT }}
 
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: ${{ env.TERRAFORM_VERSION }}
+      - name: Install Terraform
+        run: |
+          curl -fsSL "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_amd64.zip" -o /tmp/terraform.zip
+          unzip -o /tmp/terraform.zip -d /tmp
+          sudo install /tmp/terraform /usr/local/bin/terraform
 
       - name: Terraform Init
         run: terraform init -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}"
 
       - name: Terraform Plan
-        run: |
-          terraform plan -input=false -out=tfplan
-          terraform show -json tfplan > plan.json
+        run: terraform plan -input=false -out=tfplan
 
-      - name: Upload plan artifacts
+      - name: Upload plan artifact
         uses: actions/upload-artifact@v4
         with:
           name: tfplan
-          path: |
-            terraform/tfplan
-            terraform/plan.json
+          path: terraform/tfplan
           retention-days: 1
 
-  # ---------------------------------------------------------------------------
-  # 3. OPA policy — conftest against the plan JSON (separate, hard-blocking job)
-  # ---------------------------------------------------------------------------
-  policy:
-    name: OPA Policy (conftest)
-    runs-on: ubuntu-latest
-    needs: plan
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Download plan artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: tfplan
-          path: plan
-
-      - name: Setup conftest
-        run: |
-          curl -sSL "https://github.com/open-policy-agent/conftest/releases/download/v${CONFTEST_VERSION}/conftest_${CONFTEST_VERSION}_Linux_x86_64.tar.gz" \
-            | sudo tar -xz -C /usr/local/bin conftest
-
-      - name: Conftest policy check
-        run: conftest test plan/plan.json -p terraform/policy
-
-  # ---------------------------------------------------------------------------
-  # 4. Apply — manual dispatch only, REQUIRES approval on `production`
-  # ---------------------------------------------------------------------------
+  # ===========================================================================
+  # STAGE 3 — apply (queued after plan; WAITS FOR APPROVAL on `production`)
+  #           Skipped only for pull_request events (never apply from a PR).
+  # ===========================================================================
   apply:
     name: Terraform Apply
     runs-on: ubuntu-latest
-    needs: policy
-    if: github.event_name == 'workflow_dispatch'
-    environment: production # add REQUIRED REVIEWERS here => manual approval gate
+    needs: plan
+    if: github.event_name != 'pull_request'
+    environment: production # REQUIRED REVIEWERS here => apply waits for approval
     defaults:
       run:
         working-directory: terraform
     steps:
-      - name: Checkout
-        uses: actions/checkout@v5
+      - uses: actions/checkout@v5
 
       - name: Authenticate to Google Cloud (WIF)
         uses: google-github-actions/auth@v2
@@ -189,15 +179,16 @@ jobs:
           workload_identity_provider: ${{ secrets.WORKLOAD_PROVIDER }}
           service_account: ${{ secrets.SERVICE_ACCOUNT }}
 
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: ${{ env.TERRAFORM_VERSION }}
+      - name: Install Terraform
+        run: |
+          curl -fsSL "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_amd64.zip" -o /tmp/terraform.zip
+          unzip -o /tmp/terraform.zip -d /tmp
+          sudo install /tmp/terraform /usr/local/bin/terraform
 
       - name: Terraform Init
         run: terraform init -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}"
 
-      - name: Download plan artifacts
+      - name: Download plan artifact
         uses: actions/download-artifact@v4
         with:
           name: tfplan

@@ -126,37 +126,47 @@ the note below.
 
 ## DevSecOps pipeline (`infra-build`)
 
-The apply workflow is security-gated:
+Three stages: five **parallel** security gates, then plan, then a gated apply.
 
-Four separate jobs, run in order:
+**Stage 1 — parallel gates (all must pass before plan):**
 
-| Job | What runs | Gate |
-|-----|-----------|------|
-| `security-scan` | `terraform fmt`/`validate`, **tfsec** + **Checkov** (SARIF → Security tab), **gitleaks** | gitleaks blocks; IaC findings surfaced |
-| `plan` | authenticated `terraform plan`, uploads plan artifact | runs automatically, blocks on failure |
-| `policy` | **OPA/conftest** against the plan JSON | runs automatically, **hard-blocks** on violation |
-| `apply` | applies the saved plan | **manual dispatch + approval on `production`** |
+| Job | What runs | Blocks? |
+|-----|-----------|---------|
+| `validate` | `terraform fmt -check` + `validate` | yes |
+| `tfsec` | tfsec IaC scan (SARIF → Security tab) | findings surfaced |
+| `checkov` | Checkov IaC scan (SARIF → Security tab) | findings surfaced |
+| `gitleaks` | secret scan | **yes** on a hit |
+| `opa` | **OPA/conftest** against the Terraform HCL (`--parser hcl2`) | **yes** on violation |
 
-- **Any push / PR touching `terraform/`** automatically runs `security-scan → plan → policy` (no apply).
-- **`apply`** runs only on manual dispatch **and** waits for approval on the `production` environment.
+**Stage 2 — `plan`** — `needs: [validate, tfsec, checkov, gitleaks, opa]`; authenticated `terraform plan`, uploads the plan artifact.
+
+**Stage 3 — `apply`** — queued after plan; **waits for approval** on `production` (skipped only on PRs).
+
+- **Any push touching `terraform/`** runs the five gates → `plan` → `apply` (which **waits for your approval**).
+- **Pull requests** run everything except `apply`.
 - **`Infra Destroy`** is a separate manual workflow that also requires the `production` approval **and** typing `destroy`.
 - IaC findings (tfsec/Checkov) appear under the repo's **Security → Code scanning** tab.
 
+> ⚠️ **Required reviewers are mandatory.** `apply` no longer gates on
+> `workflow_dispatch`, so the **only** thing stopping an automatic apply on push
+> is the `production` environment's **Required reviewers**. If that isn't set,
+> pushes will apply automatically. Set it: Settings → Environments → `production`
+> → Required reviewers.
+
 ### Policy-as-code (OPA / conftest)
 
-Rego policies live in [`policy/`](policy/) and are enforced against the Terraform
-plan (`terraform show -json`). They **hard-block** apply on violation. Current rules:
+Rego policies live in [`policy/`](policy/) and run **before plan** — conftest
+evaluates the Terraform **HCL source** (`--parser hcl2`), so no cloud access or
+plan is needed. They **hard-block** the pipeline on violation. Current rules:
 
 - Buckets must enforce `public_access_prevention` and uniform bucket-level access.
 - Node pools must use a dedicated SA, shielded secure boot, and `GKE_METADATA`.
 - Cluster must enable Workload Identity, Shielded Nodes, and private nodes.
 
-Run them locally against a plan:
+Run them locally:
 
 ```bash
-cd terraform
-terraform plan -out=tfplan && terraform show -json tfplan > plan.json
-conftest test plan.json -p policy
+conftest test $(find terraform -name '*.tf') --parser hcl2 -p terraform/policy
 ```
 
 The Terraform is hardened to pass tfsec + Checkov cleanly; the few non-applicable

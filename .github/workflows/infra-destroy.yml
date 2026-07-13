@@ -16,6 +16,7 @@ permissions:
 
 env:
   TF_VAR_project_id: ${{ secrets.GCP_PROJECT_ID }}
+  TERRAFORM_VERSION: 1.9.8
 
 jobs:
   destroy:
@@ -42,10 +43,12 @@ jobs:
           workload_identity_provider: ${{ secrets.WORKLOAD_PROVIDER }}
           service_account: ${{ secrets.SERVICE_ACCOUNT }}
 
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: 1.9.8
+      - name: Install Terraform
+        run: |
+          curl -fsSL "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_amd64.zip" -o /tmp/terraform.zip
+          unzip -o /tmp/terraform.zip -d /tmp
+          sudo install /tmp/terraform /usr/local/bin/terraform
+          terraform version
 
       - name: Terraform Init
         run: terraform init -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}"
