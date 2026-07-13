@@ -1,0 +1,75 @@
+# ---------------------------------------------------------------------------
+# vLLM production-stack — CPU-only values, tailored to the anime-recommender
+# GKE cluster (serve pool = e2-highmem-4, tainted dedicated=vllm, label workload=vllm).
+#
+# The upstream chart is GPU-first. Every line below marked [CPU] is a change
+# from the GPU defaults that makes it run on CPU nodes.
+#
+#   helm repo add vllm https://vllm-project.github.io/production-stack
+#   helm install vllm vllm/vllm-stack -f values-cpu.yaml
+# ---------------------------------------------------------------------------
+
+servingEngineSpec:
+  runtimeClassName: "" # [CPU] default is "nvidia"; empty = schedule on normal (CPU) nodes
+  containerPort: 8000
+  servicePort: 80
+
+  modelSpec:
+    - name: "qwen3b"
+      enabled: true
+
+      # [CPU] CPU build of the vLLM OpenAI server (default chart image is the GPU one)
+      repository: "vllm/vllm-openai-cpu"
+      tag: "latest"
+
+      modelURL: "Qwen/Qwen2.5-3B-Instruct" # pulled from HF Hub via Cloud NAT egress
+      replicaCount: 1 # one CPU replica (serve pool scales 0->1)
+
+      # [CPU] no GPU; size for a 3B model on CPU (weights ~6GB + KV + overhead)
+      requestGPU: 0
+      requestCPU: 3
+      requestMemory: "14Gi"
+      limitCPU: 4
+      limitMemory: "26Gi"
+
+      # Cache the downloaded weights so a pod restart doesn't re-download them
+      pvcStorage: "20Gi"
+      pvcAccessMode:
+        - ReadWriteOnce
+
+      vllmConfig:
+        maxModelLen: 8192
+        dtype: "bfloat16"
+        extraArgs:
+          - "--enforce-eager" # [CPU] skip CUDA graphs, lower memory + faster start
+
+      env:
+        - name: VLLM_CPU_KVCACHE_SPACE # [CPU] 4 GiB KV-cache pool for CPU backend
+          value: "4"
+
+      # [CPU] Land on the dedicated serve pool: tolerate its taint + require its label.
+      tolerations:
+        - key: "dedicated"
+          operator: "Equal"
+          value: "vllm"
+          effect: "NoSchedule"
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: "workload"
+              operator: "In"
+              values:
+                - "vllm"
+
+# The router is the single OpenAI-compatible entry point. Lightweight -> app pool.
+routerSpec:
+  replicaCount: 1
+  serviceType: ClusterIP # in-cluster; the app calls it directly
+  routingLogic: "roundrobin" # session/kv-aware only help with >1 replica
+  engineScrapeInterval: 15
+  requestStatsWindow: 60
+  resources:
+    requests:
+      cpu: "250m"
+      memory: "512Mi"
+    limits:
+      memory: "512Mi"

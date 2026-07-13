@@ -1,0 +1,123 @@
+name: vLLM Deploy
+
+# Deploys the vLLM production-stack (CPU) to the GKE cluster via Helm.
+#   - push / PR under k8s/production-stack/**: lint + render only (no cluster access).
+#   - manual dispatch: lint, then deploy/uninstall — WAITS FOR APPROVAL on `production`.
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "What to do"
+        type: choice
+        options: [deploy, uninstall]
+        default: deploy
+  push:
+    paths:
+      - "k8s/production-stack/**"
+      - ".github/workflows/vllm-deploy.yml"
+  pull_request:
+    paths:
+      - "k8s/production-stack/**"
+      - ".github/workflows/vllm-deploy.yml"
+
+concurrency:
+  group: vllm-${{ github.ref }}
+  cancel-in-progress: false # never cancel an in-flight deploy
+
+permissions:
+  contents: read
+  id-token: write # Workload Identity Federation
+
+env:
+  CLUSTER_NAME: anime-rec-cluster
+  CLUSTER_LOCATION: us-central1-a
+  NAMESPACE: default
+  RELEASE: vllm
+  CHART: vllm/vllm-stack
+  CHART_REPO: https://vllm-project.github.io/production-stack
+  VALUES: k8s/production-stack/values-cpu.yaml
+  KUBECONFORM_VERSION: 0.6.7
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1. Lint — render the chart with our values and schema-check the manifests.
+  #    No cluster access, so it runs freely on push/PR.
+  # ---------------------------------------------------------------------------
+  lint:
+    name: Helm render + validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Helm
+        run: curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+
+      - name: Add chart repo
+        run: |
+          helm repo add vllm "$CHART_REPO"
+          helm repo update
+
+      - name: Render manifests (validates values against the chart)
+        run: |
+          helm template "$RELEASE" "$CHART" -n "$NAMESPACE" -f "$VALUES" > /tmp/rendered.yaml
+          echo "rendered $(grep -c '^kind:' /tmp/rendered.yaml) objects"
+
+      - name: Schema-validate rendered manifests (kubeconform)
+        run: |
+          curl -fsSL "https://github.com/yannh/kubeconform/releases/download/v${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" \
+            | tar -xz -C /tmp kubeconform
+          /tmp/kubeconform -summary -ignore-missing-schemas /tmp/rendered.yaml
+
+  # ---------------------------------------------------------------------------
+  # 2. Deploy — manual dispatch only, WAITS FOR APPROVAL on `production`.
+  # ---------------------------------------------------------------------------
+  deploy:
+    name: Helm deploy to GKE
+    runs-on: ubuntu-latest
+    needs: lint
+    if: github.event_name == 'workflow_dispatch'
+    environment: production # REQUIRED REVIEWERS => waits for approval
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Authenticate to Google Cloud (WIF)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WORKLOAD_PROVIDER }}
+          service_account: ${{ secrets.SERVICE_ACCOUNT }}
+
+      - name: Get GKE credentials
+        uses: google-github-actions/get-gke-credentials@v2
+        with:
+          cluster_name: ${{ env.CLUSTER_NAME }}
+          location: ${{ env.CLUSTER_LOCATION }}
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+
+      - name: Install Helm
+        run: curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+
+      - name: Add chart repo
+        run: |
+          helm repo add vllm "$CHART_REPO"
+          helm repo update
+
+      - name: Deploy or uninstall
+        run: |
+          if [ "${{ github.event.inputs.action }}" = "uninstall" ]; then
+            echo "Uninstalling release $RELEASE ..."
+            helm uninstall "$RELEASE" -n "$NAMESPACE"
+          else
+            echo "Deploying release $RELEASE (this scales the serve pool 0->1 and downloads the model — slow) ..."
+            helm upgrade --install "$RELEASE" "$CHART" \
+              -n "$NAMESPACE" --create-namespace \
+              -f "$VALUES" \
+              --wait --timeout 30m
+          fi
+
+      - name: Show status
+        if: ${{ github.event.inputs.action != 'uninstall' }}
+        run: |
+          kubectl get pods -n "$NAMESPACE" -o wide
+          echo "--- services ---"
+          kubectl get svc -n "$NAMESPACE"
+          echo "Router endpoint: http://vllm-router-service.$NAMESPACE.svc.cluster.local:80/v1"
