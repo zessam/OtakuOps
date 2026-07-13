@@ -30,10 +30,10 @@ servingEngineSpec:
       modelURL: "Qwen/Qwen2.5-3B-Instruct" # pulled from HF Hub via Cloud NAT egress
       replicaCount: 1 # one CPU replica (serve pool scales 0->1)
 
-      # [CPU] no GPU; size for a 3B model on CPU (weights ~6GB + KV + overhead)
+      # [CPU] no GPU. float32 weights are ~12GB (vs ~6GB bf16), so raise the request.
       requestGPU: 0
       requestCPU: 3
-      requestMemory: "14Gi"
+      requestMemory: "18Gi"
       limitCPU: 4
       limitMemory: "26Gi"
 
@@ -44,7 +44,7 @@ servingEngineSpec:
 
       vllmConfig:
         maxModelLen: 4096 # [CPU] smaller context => much faster warmup profiling on CPU
-        dtype: "bfloat16"
+        dtype: "float32" # [CPU] this CPU lacks AVX512-BF16; bf16 falls back to slow torch. fp32 uses oneDNN.
         extraArgs:
           - "--enforce-eager" # [CPU] skip CUDA graphs, lower memory + faster start
           - "--max-num-seqs" # [CPU] smaller warmup batch => finishes within the startup probe
