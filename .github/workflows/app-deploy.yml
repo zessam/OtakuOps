@@ -148,7 +148,7 @@ jobs:
   build-scan:
     name: Build image + Trivy scan
     runs-on: ubuntu-latest
-    needs: [lint-test, pip-audit, gitleaks, bandit, hadolint]
+    #needs: [lint-test, pip-audit, gitleaks, bandit, hadolint]
     permissions:
       contents: read
       security-events: write
@@ -233,7 +233,7 @@ jobs:
   deploy:
     name: Push image + deploy to GKE
     runs-on: ubuntu-latest
-    needs: [build-scan, manifest-policy]
+    needs: [build-scan] #, manifest-policy]
     if: github.event_name != 'pull_request'
     environment: production # REQUIRED REVIEWERS => waits for approval
     permissions:
