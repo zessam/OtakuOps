@@ -14,6 +14,11 @@ servingEngineSpec:
   containerPort: 8000
   servicePort: 80
 
+  # [CPU] CPU warmup is slow; give the engine ~25 min to reach /health before the
+  # startup probe kills it (15s + 150*10s). Default is 60 (~10 min) = too short.
+  startupProbe:
+    failureThreshold: 150
+
   modelSpec:
     - name: "qwen3b"
       enabled: true
@@ -38,10 +43,12 @@ servingEngineSpec:
         - ReadWriteOnce
 
       vllmConfig:
-        maxModelLen: 8192
+        maxModelLen: 4096 # [CPU] smaller context => much faster warmup profiling on CPU
         dtype: "bfloat16"
         extraArgs:
           - "--enforce-eager" # [CPU] skip CUDA graphs, lower memory + faster start
+          - "--max-num-seqs" # [CPU] smaller warmup batch => finishes within the startup probe
+          - "16"
 
       env:
         - name: VLLM_CPU_KVCACHE_SPACE # [CPU] 4 GiB KV-cache pool for CPU backend
@@ -67,6 +74,10 @@ routerSpec:
   routingLogic: "roundrobin" # session/kv-aware only help with >1 replica
   engineScrapeInterval: 15
   requestStatsWindow: 60
+  # [CPU] the router image is ~5.3GB (bundles LMCache/torch); it can't boot in the
+  # default ~20s. Give it ~5 min (5s + 60*5s) before the startup probe kills it.
+  startupProbe:
+    failureThreshold: 60
   resources:
     requests:
       cpu: "300m"
