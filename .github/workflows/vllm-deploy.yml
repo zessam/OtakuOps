@@ -24,7 +24,7 @@ permissions:
 
 env:
   CLUSTER_NAME: anime-rec-cluster
-  CLUSTER_LOCATION: us-central1-a
+  CLUSTER_LOCATION: us-central1-c
   NAMESPACE: default
   RELEASE: vllm
   CHART: vllm/vllm-stack

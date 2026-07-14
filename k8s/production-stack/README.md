@@ -64,7 +64,7 @@ every GPU assumption. Each change is marked `[CPU]` in the file:
 
 ```bash
 # cluster is up (terraform applied); get credentials
-gcloud container clusters get-credentials anime-rec-cluster --zone us-central1-a --project <PROJECT_ID>
+gcloud container clusters get-credentials anime-rec-cluster --zone us-central1-c --project <PROJECT_ID>
 
 # tools
 helm version && kubectl version --client

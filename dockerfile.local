@@ -1,0 +1,79 @@
+# syntax=docker/dockerfile:1
+# =============================================================================
+# LOCAL-ONLY image — runs the Streamlit app against the hosted Groq fallback
+# (LLM_PROVIDER=groq). This is for local iteration / LLMSecOps poking by hand.
+#
+# It does NOT replace ./dockerfile — that one stays vLLM-backed and is what the
+# cloud (GKE) deploy builds. Nothing here is referenced by k8s/ or the CI, so
+# the cloud path is unaffected.
+#
+# Build:  docker build -f dockerfile.local -t anime-rec:local .
+# Run:    docker run --rm -p 8501:8501 -e GROQ_API_KEY=gsk_xxx anime-rec:local
+#   or:   docker run --rm -p 8501:8501 --env-file .env anime-rec:local
+# The GROQ_API_KEY is a secret and is passed at RUN time — never baked in.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Stage 1 — builder: compile deps, bake the embedding model + Chroma index.
+# (Identical to the cloud build — the vector store is provider-agnostic.)
+# -----------------------------------------------------------------------------
+FROM python@sha256:e5300dc020a26a34a19337a57602955a2510e22abeb176edd6de6cd2cc927dd4 AS builder
+# ^ python:3.10-slim pinned by digest (reproducible; satisfies hadolint DL3006)
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    HF_HOME=/opt/hf
+
+# build-essential compiles some wheels; it stays in this stage only.
+# hadolint ignore=DL3008
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+RUN pip install --upgrade pip setuptools wheel
+
+WORKDIR /app
+COPY . .
+RUN pip install --no-cache-dir -e .
+
+# Bake the sentence-transformers embedding model (no HF download at runtime).
+RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
+
+# Build the Chroma vector store from the bundled CSVs (offline — model is cached).
+RUN HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 python pipeline/build_pipeline.py
+
+# -----------------------------------------------------------------------------
+# Stage 2 — runtime: slim, non-root, Groq-backed.
+# -----------------------------------------------------------------------------
+FROM python@sha256:e5300dc020a26a34a19337a57602955a2510e22abeb176edd6de6cd2cc927dd4
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel
+
+# Non-root runtime user (uid 10001 matches the k8s securityContext).
+RUN groupadd -g 10001 app \
+    && useradd -u 10001 -g app -m -d /home/app app
+
+COPY --from=builder /opt/venv /opt/venv
+COPY --from=builder /opt/hf /opt/hf
+WORKDIR /app
+COPY --from=builder /app /app
+
+# The one meaningful difference from the cloud image: use the Groq fallback.
+# GROQ_API_KEY is intentionally NOT set here — pass it with -e / --env-file.
+ENV PATH="/opt/venv/bin:$PATH" \
+    HF_HOME=/opt/hf \
+    HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1 \
+    LLM_PROVIDER=groq
+
+RUN chown -R app:app /app /opt/hf
+USER app
+
+EXPOSE 8501
+CMD ["streamlit", "run", "app/app.py", "--server.port=8501", "--server.address=0.0.0.0", "--server.headless=true"]

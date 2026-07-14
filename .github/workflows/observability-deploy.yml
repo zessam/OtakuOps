@@ -26,7 +26,7 @@ permissions:
 
 env:
   CLUSTER_NAME: anime-rec-cluster
-  CLUSTER_LOCATION: us-central1-a
+  CLUSTER_LOCATION: us-central1-c
   MONITORING_NS: monitoring
   PROM_RELEASE: kube-prom-stack
   PROM_VALUES: k8s/observability/kube-prom-stack-values.yaml

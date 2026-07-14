@@ -17,7 +17,7 @@ permissions:
 
 env:
   CLUSTER_NAME: anime-rec-cluster
-  CLUSTER_LOCATION: us-central1-a
+  CLUSTER_LOCATION: us-central1-c
   ROUTER_SVC: vllm-router-service
   NS: default
   MODEL: Qwen/Qwen2.5-3B-Instruct

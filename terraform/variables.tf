@@ -10,9 +10,13 @@ variable "region" {
 }
 
 variable "zone" {
-  description = "GCP zone for the (zonal) GKE cluster and its node pools. Must have the chosen GPU available."
+  # us-central1-a hit an "GCE out of resources" stockout on e2-highmem-4 (the serve
+  # pool machine). The stockout is per-zone, so we relocate to us-central1-c, which
+  # keeps the cheapest 32GB machine + the standard CPUS quota (no pricier N2 family,
+  # no new N2_CPUS quota). If -c is also short, try -f then -b.
+  description = "GCP zone for the (zonal) GKE cluster and its node pools. Must have serve_machine_type capacity."
   type        = string
-  default     = "us-central1-a"
+  default     = "us-central1-c"
 }
 
 variable "cluster_name" {

@@ -3,7 +3,7 @@ project_id = "my-gcp-project-id"
 
 # Optional overrides (defaults shown):
 # region              = "us-central1"
-# zone                = "us-central1-a"
+# zone                = "us-central1-c"
 # cluster_name        = "anime-rec-cluster"
 # artifact_repo_name  = "anime-rec"
 # model_bucket_name   = ""            # defaults to <project_id>-anime-models
