@@ -34,7 +34,7 @@ OtakuOps is an end-to-end **LLMOps / LLMSecOps** reference platform. The user-fa
 At the surface, a user types a preference — *"light-hearted anime with a school setting"* — and gets three tailored recommendations with plot summaries and reasons. Under the hood:
 
 - **RAG**, not fine-tuning. Anime synopses are embedded with `all-MiniLM-L6-v2`, stored in **Chroma**, and retrieved at query time to ground a `RetrievalQA` chain.
-- **Self-hosted inference.** The LLM is **Qwen2.5-3B-Instruct** served by the **vLLM production-stack** on GKE. The same stack runs locally on **minikube** (with a lightweight SLM) for fast, cluster-realistic iteration before touching the cloud.
+- **Self-hosted inference.** The LLM is **Qwen2.5-1.5B-Instruct** served by the **vLLM production-stack** on GKE. The same stack runs locally on **minikube** (with a lightweight SLM) for fast, cluster-realistic iteration before touching the cloud.
 - **Everything is code.** The cluster, network, storage, and registry are provisioned by **Terraform**; every deploy runs through a security-gated GitHub Actions pipeline.
 
 ```mermaid
@@ -47,7 +47,7 @@ mindmap
       MiniLM embeddings
     Serving
       vLLM production-stack
-      Qwen2.5-3B-Instruct
+      Qwen2.5-1.5B-Instruct
       minikube local trial
     Infrastructure
       Terraform
@@ -85,7 +85,7 @@ flowchart TB
         end
 
         subgraph servePool["Serve node pool (tainted, scale 0→1)"]
-            engine["vLLM engine<br/>Qwen2.5-3B-Instruct"]
+            engine["vLLM engine<br/>Qwen2.5-1.5B-Instruct"]
         end
 
         subgraph monNs["monitoring namespace"]
@@ -126,7 +126,7 @@ sequenceDiagram
     participant P as Recommendation Pipeline
     participant C as Chroma (retriever)
     participant R as vLLM router
-    participant E as vLLM engine (Qwen2.5-3B)
+    participant E as vLLM engine (Qwen2.5-1.5B)
 
     U->>S: "light-hearted school anime"
     S->>P: pipeline.recommend(query)
@@ -210,7 +210,7 @@ Auth is **keyless** throughout via **Workload Identity Federation** — no servi
 
 ```mermaid
 flowchart LR
-    model["Deployed LLM<br/>(vLLM / Qwen2.5-3B)"]
+    model["Deployed LLM<br/>(vLLM / Qwen2.5-1.5B)"]
 
     subgraph suite["LLMSecOps stages"]
         pf["Promptfoo<br/>injection / jailbreak / leakage"]
@@ -261,7 +261,7 @@ See [`k8s/observability/README.md`](k8s/observability/README.md) for PromQL pane
 | **Orchestration**  | LangChain (`RetrievalQA`)                                              |
 | **Vector store**   | Chroma                                                                 |
 | **Embeddings**     | `sentence-transformers/all-MiniLM-L6-v2`                               |
-| **LLM (cloud)**    | Qwen2.5-3B-Instruct via vLLM production-stack                          |
+| **LLM (cloud)**    | Qwen2.5-1.5B-Instruct via vLLM production-stack                          |
 | **LLM (local)**    | Lightweight SLM via vLLM on minikube                                   |
 | **Cloud**          | Google Kubernetes Engine (GKE)                                         |
 | **Local cluster**  | minikube (CPU, self-hosted vLLM)                                       |
@@ -333,7 +333,7 @@ kubectl apply -f k8s/app/
 ```
 
 > In-cluster, the app defaults to the router at
-> `http://vllm-router-service.default.svc.cluster.local:80/v1` serving `Qwen/Qwen2.5-3B-Instruct` —
+> `http://vllm-router-service.default.svc.cluster.local:80/v1` serving `Qwen/Qwen2.5-1.5B-Instruct` —
 > no API key required. Configuration lives in `config/config.py`.
 
 ---

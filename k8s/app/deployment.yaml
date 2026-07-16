@@ -54,7 +54,7 @@ spec:
             - name: VLLM_BASE_URL
               value: "http://vllm-router-service.default.svc.cluster.local:80/v1"
             - name: VLLM_MODEL_NAME
-              value: "Qwen/Qwen2.5-3B-Instruct"
+              value: "Qwen/Qwen2.5-1.5B-Instruct"
             # all-MiniLM-L6-v2 is baked into the image at /opt/hf (dockerfile) and
             # loaded offline — must match the image's HF_HOME or the app can't find it.
             - name: HF_HOME

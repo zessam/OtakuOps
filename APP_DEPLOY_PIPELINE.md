@@ -15,9 +15,9 @@ Two config values still point at the **old minikube** setup and must change for 
 | Setting | Current default (`config/config.py`) | Production value |
 |---|---|---|
 | `VLLM_BASE_URL` | `http://vllm-server.default.svc.cluster.local:8000/v1` | `http://vllm-router-service.default.svc.cluster.local:80/v1` |
-| `VLLM_MODEL_NAME` | `HuggingFaceTB/SmolLM2-135M-Instruct` | `Qwen/Qwen2.5-3B-Instruct` |
+| `VLLM_MODEL_NAME` | `HuggingFaceTB/SmolLM2-135M-Instruct` | `Qwen/Qwen2.5-1.5B-Instruct` |
 
-Source of truth: `k8s/production-stack/values-cpu.yaml` (`modelURL: Qwen/Qwen2.5-3B-Instruct`,
+Source of truth: `k8s/production-stack/values-cpu.yaml` (`modelURL: Qwen/Qwen2.5-1.5B-Instruct`,
 router service on port `80`). These are injected as **env vars** in the app Deployment — not
 baked into the image — so the same image works against any backend.
 

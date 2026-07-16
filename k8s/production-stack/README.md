@@ -1,7 +1,7 @@
 # vLLM production-stack on CPU — guide
 
 This runs the [vLLM production-stack](https://github.com/vllm-project/production-stack)
-on our **CPU-only** GKE cluster to serve `Qwen/Qwen2.5-3B-Instruct`, and points the
+on our **CPU-only** GKE cluster to serve `Qwen/Qwen2.5-1.5B-Instruct`, and points the
 anime-recommender app at it.
 
 ---
@@ -94,7 +94,7 @@ Check the router is serving:
 ```bash
 kubectl get svc | grep router          # e.g. vllm-router-service  ClusterIP  ...  80/TCP
 kubectl port-forward svc/vllm-router-service 8000:80 &
-curl http://localhost:8000/v1/models   # OpenAI-compatible; lists qwen3b
+curl http://localhost:8000/v1/models   # OpenAI-compatible; lists qwen15b
 ```
 
 ---
@@ -107,7 +107,7 @@ stack, the app talks to the **router**, not the engine directly. Set:
 ```
 LLM_PROVIDER=vllm
 VLLM_BASE_URL=http://vllm-router-service.default.svc.cluster.local:80/v1
-VLLM_MODEL_NAME=Qwen/Qwen2.5-3B-Instruct
+VLLM_MODEL_NAME=Qwen/Qwen2.5-1.5B-Instruct
 ```
 
 (That's the same env the app reads in `config/config.py` — only the URL/model change

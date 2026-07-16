@@ -2,7 +2,7 @@
 
 Provisions everything needed to run the Anime Recommender + vLLM on GKE.
 **CPU-only** setup (no GPU) — fits the $300 free tier and needs no billing
-upgrade or GPU quota. vLLM serves a small model (Qwen2.5-3B) on CPU.
+upgrade or GPU quota. vLLM serves a small model (Qwen2.5-1.5B) on CPU.
 
 - GKE cluster (zonal, VPC-native, Workload Identity)
 - app-pool (`e2-standard-2`, autoscale 1→2) + serve-pool (vLLM on CPU, `e2-highmem-4` / 32GB, scales 0→1)
@@ -215,8 +215,8 @@ Typical next steps (not managed by this Terraform):
 4. Deploy vLLM on the serve pool. Its pod must set:
    - `nodeSelector: { workload: vllm }`
    - a toleration for `dedicated=vllm:NoSchedule`
-   - image `vllm/vllm-openai-cpu`, serving `Qwen/Qwen2.5-3B-Instruct`
-   - `resources.requests.memory: ~14Gi`, and env `VLLM_CPU_KVCACHE_SPACE=4`
+   - image `vllm/vllm-openai-cpu`, serving `Qwen/Qwen2.5-1.5B-Instruct`
+   - `resources.requests.memory: ~12Gi`, and env `VLLM_CPU_KVCACHE_SPACE=4`
    Then deploy the app pointing `VLLM_BASE_URL` at the vLLM service.
 
 ## Sizing (why these machines)
@@ -224,7 +224,7 @@ Typical next steps (not managed by this Terraform):
 | Pool | Machine | Allocatable | Hosts |
 |------|---------|-------------|-------|
 | app | `e2-standard-2` (2 vCPU / 8GB), autoscale 1→2 | ~1930m CPU / 6.1GB | Streamlit app + pipeline (+ light monitoring) |
-| serve | `e2-highmem-4` (4 vCPU / 32GB), scale 0→1 | ~3920m CPU / 28.3GB | vLLM serving Qwen2.5-3B (~13-15GB) |
+| serve | `e2-highmem-4` (4 vCPU / 32GB), scale 0→1 | ~3920m CPU / 28.3GB | vLLM serving Qwen2.5-1.5B (~7-9GB) |
 
 Peak usage (app scaled to 2 + serve up) = **8 vCPU** = the default free-tier
 regional quota. Steady state is 2–6 vCPU. `e2-medium` was too small (only

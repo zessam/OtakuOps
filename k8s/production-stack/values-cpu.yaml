@@ -20,25 +20,25 @@ servingEngineSpec:
     failureThreshold: 150
 
   modelSpec:
-    - name: "qwen3b"
+    - name: "qwen15b"
       enabled: true
 
       # [CPU] CPU build of the vLLM OpenAI server (default chart image is the GPU one)
       repository: "vllm/vllm-openai-cpu"
       tag: "latest"
 
-      modelURL: "Qwen/Qwen2.5-3B-Instruct" # pulled from HF Hub via Cloud NAT egress
+      modelURL: "Qwen/Qwen2.5-1.5B-Instruct" # pulled from HF Hub via Cloud NAT egress
       replicaCount: 1 # one CPU replica (serve pool scales 0->1)
 
-      # [CPU] no GPU. float32 weights are ~12GB (vs ~6GB bf16), so raise the request.
+      # [CPU] no GPU. float32 weights are ~6GB (vs ~3GB bf16), so raise the request.
       requestGPU: 0
       requestCPU: 3
-      requestMemory: "18Gi"
+      requestMemory: "12Gi"
       limitCPU: 4
-      limitMemory: "26Gi"
+      limitMemory: "20Gi"
 
       # Cache the downloaded weights so a pod restart doesn't re-download them
-      pvcStorage: "20Gi"
+      pvcStorage: "10Gi"
       pvcAccessMode:
         - ReadWriteOnce
 
