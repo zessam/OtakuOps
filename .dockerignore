@@ -11,6 +11,10 @@ chroma_db/
 .env
 .env.*
 .claude
+# google-github-actions/auth writes gha-creds-<random>.json into GITHUB_WORKSPACE
+# BEFORE the build step, so `COPY . .` bakes it into the image. It is a Workload
+# Identity external-account config (not a private key), but it must never ship.
+gha-creds-*.json
 __pycache__/
 *.pyc
 .pytest_cache/

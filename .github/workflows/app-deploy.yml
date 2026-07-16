@@ -205,6 +205,9 @@ jobs:
           exit-code: "1" # HARD gate
           ignore-unfixed: true
           severity: HIGH,CRITICAL
+          # Time-boxed suppressions ONLY on the gate; the SARIF step above stays
+          # unsuppressed so everything still shows up in the Security tab.
+          trivyignores: .trivyignore.yaml
 
       - name: Generate SBOM (SPDX)
         uses: anchore/sbom-action@v0
@@ -319,6 +322,9 @@ jobs:
           exit-code: "1"
           ignore-unfixed: true
           severity: HIGH,CRITICAL
+          # Time-boxed suppressions ONLY on the gate; the SARIF step above stays
+          # unsuppressed so everything still shows up in the Security tab.
+          trivyignores: .trivyignore.yaml
 
       - name: Generate SBOM (SPDX)
         uses: anchore/sbom-action@v0
