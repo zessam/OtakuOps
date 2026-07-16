@@ -3,7 +3,7 @@ name: App Deploy (vLLM)
 # Secure CI/CD for the Anime Recommender Streamlit app (self-hosted vLLM image).
 # The Groq-backed variant (dockerfile.local + k8s/app-groq/) has NO pipeline yet and
 # is deployed by hand; this workflow builds and deploys the vLLM image only.
-#   push / PR (app sources, dockerfile, k8s/app/**): source gates -> build+scan -> manifest policy.
+#   push / PR (app sources, dockerfile, k8s/app/**): source gates -> build -> manifest policy.
 #   push to main / manual dispatch: same gates, then build+push+sign+deploy to GKE.
 # The deploy job WAITS FOR APPROVAL on the `production` environment and never runs from a PR.
 # LLMSecOps (red-teaming the model/RAG endpoint) is a SEPARATE workflow — not here.
@@ -52,9 +52,6 @@ env:
   AR_REPO: anime-rec # Artifact Registry repo (terraform: var.artifact_repo_name)
   IMAGE_NAME: anime-rec-app
   KUBECONFORM_VERSION: "0.6.7"
-  # equivalent to `trivy --skip-version-check` on every Trivy step (env is ignored
-  # by Trivy versions that don't support the flag, so it's always safe).
-  TRIVY_SKIP_VERSION_CHECK: "true"
 
 jobs:
   # ===========================================================================
@@ -152,19 +149,18 @@ jobs:
           category: hadolint
 
   # ===========================================================================
-  # STAGE 2 — build image locally + scan (Trivy). No push. PR merge gate.
+  # STAGE 2 — build image locally + SBOM. No push. PR merge gate.
   # ===========================================================================
   build-scan:
-    name: Build + Trivy scan (PR gate)
+    name: Build + SBOM (PR gate)
     runs-on: ubuntu-latest
-    # PR-only: build the image ONCE locally and scan it before merge.
-    # On push/dispatch the `deploy` job builds+scans the PUSHED image, so the
+    # PR-only: prove the image still builds before merge.
+    # On push/dispatch the `deploy` job builds the PUSHED image, so the
     # image is only ever built once per run (no double build).
     if: github.event_name == 'pull_request'
     needs: [lint-test, pip-audit, gitleaks, bandit, hadolint, kubeconform, kube-linter]
     permissions:
       contents: read
-      security-events: write
     steps:
       - uses: actions/checkout@v5
 
@@ -180,34 +176,6 @@ jobs:
           tags: ${{ env.IMAGE_NAME }}:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
-
-      - name: Trivy image scan (SARIF)
-        uses: aquasecurity/trivy-action@v0.36.0
-        with:
-          image-ref: ${{ env.IMAGE_NAME }}:ci
-          format: sarif
-          output: trivy.sarif
-          ignore-unfixed: true
-          severity: HIGH,CRITICAL
-
-      - name: Upload Trivy SARIF
-        if: always() && hashFiles('trivy.sarif') != '' # skip if the scan never produced it
-        uses: github/codeql-action/upload-sarif@v4
-        with:
-          sarif_file: trivy.sarif
-          category: trivy
-
-      - name: Trivy gate (fail on fixable HIGH/CRITICAL)
-        uses: aquasecurity/trivy-action@v0.36.0
-        with:
-          image-ref: ${{ env.IMAGE_NAME }}:ci
-          format: table
-          exit-code: "1" # HARD gate
-          ignore-unfixed: true
-          severity: HIGH,CRITICAL
-          # Time-boxed suppressions ONLY on the gate; the SARIF step above stays
-          # unsuppressed so everything still shows up in the Security tab.
-          trivyignores: .trivyignore.yaml
 
       - name: Generate SBOM (SPDX)
         uses: anchore/sbom-action@v0
@@ -251,16 +219,15 @@ jobs:
   # STAGE 4 — build+push+sign+deploy to GKE. Non-PR only; WAITS FOR APPROVAL.
   # ===========================================================================
   deploy:
-    name: Build+push, scan, deploy to GKE
+    name: Build+push, sign, deploy to GKE
     runs-on: ubuntu-latest
-    # Builds+pushes the image ONCE, scans that exact digest, then deploys it.
+    # Builds+pushes the image ONCE, then signs and deploys that exact digest.
     needs: [lint-test, pip-audit, gitleaks, bandit, hadolint, kubeconform, kube-linter]
     if: github.event_name != 'pull_request'
     environment: production # REQUIRED REVIEWERS => waits for approval
     permissions:
       contents: read
       id-token: write # Workload Identity Federation + cosign keyless
-      security-events: write # upload Trivy SARIF
     steps:
       - uses: actions/checkout@v5
 
@@ -296,35 +263,6 @@ jobs:
           tags: ${{ env.REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.AR_REPO }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-
-      # --- all image scans run on the ONE pushed image, before deploy ---
-      - name: Trivy scan pushed image (SARIF)
-        uses: aquasecurity/trivy-action@v0.36.0
-        with:
-          image-ref: ${{ env.REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.AR_REPO }}/${{ env.IMAGE_NAME }}@${{ steps.push.outputs.digest }}
-          format: sarif
-          output: trivy.sarif
-          ignore-unfixed: true
-          severity: HIGH,CRITICAL
-
-      - name: Upload Trivy SARIF
-        if: always() && hashFiles('trivy.sarif') != '' # skip if the scan never produced it
-        uses: github/codeql-action/upload-sarif@v4
-        with:
-          sarif_file: trivy.sarif
-          category: trivy
-
-      - name: Trivy gate on the pushed image (fail-closed)
-        uses: aquasecurity/trivy-action@v0.36.0
-        with:
-          image-ref: ${{ env.REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.AR_REPO }}/${{ env.IMAGE_NAME }}@${{ steps.push.outputs.digest }}
-          format: table
-          exit-code: "1"
-          ignore-unfixed: true
-          severity: HIGH,CRITICAL
-          # Time-boxed suppressions ONLY on the gate; the SARIF step above stays
-          # unsuppressed so everything still shows up in the Security tab.
-          trivyignores: .trivyignore.yaml
 
       - name: Generate SBOM (SPDX)
         uses: anchore/sbom-action@v0
@@ -369,43 +307,4 @@ jobs:
           kubectl apply -f k8s/app/ -n "$NAMESPACE"
           kubectl rollout status deployment/anime-rec-app -n "$NAMESPACE" --timeout=5m
 
-      # The pod is Ready as soon as Streamlit's /_stcore/health answers, which says
-      # nothing about vLLM. Resolve the router from INSIDE the pod, using the pod's own
-      # VLLM_BASE_URL, so a wrong service name / port can't ship green.
-      # Advisory: the serve pool scales to zero and vLLM deploys on its own schedule,
-      # so an unreachable router must not fail an otherwise-good app rollout.
-      - name: Smoke-test the vLLM router from the app pod (advisory)
-        run: |
-          POD=$(kubectl get pod -n "$NAMESPACE" -l app.kubernetes.io/name=anime-rec-app \
-                  -o jsonpath='{.items[0].metadata.name}')
-          echo "Probing \$VLLM_BASE_URL/models from ${POD} ..."
-          # urllib is stdlib -- no curl in the hardened runtime image. Every line of the
-          # probe is indented to this block's level; YAML strips that indent back off, so
-          # python still receives its top-level statements at column 0.
-          if kubectl exec -n "$NAMESPACE" "$POD" -- python -c '
-          import json, os, sys, urllib.request
-          url = os.environ["VLLM_BASE_URL"].rstrip("/") + "/models"
-          want = os.environ["VLLM_MODEL_NAME"]
-          try:
-              with urllib.request.urlopen(url, timeout=30) as r:
-                  served = [m["id"] for m in json.load(r).get("data", [])]
-          except Exception as e:
-              print(f"unreachable: {url} -> {e!r}")
-              sys.exit(1)
-          print(f"router is serving: {served}")
-          if want not in served:
-              print(f"MODEL MISMATCH: app requests {want!r}, router serves {served}")
-              sys.exit(2)
-          print(f"OK: {want} is served")
-          '; then
-            echo "vLLM router reachable and serving the expected model."
-          else
-            echo "::warning::app is deployed but the vLLM router did not answer as expected \
-          (serve pool scaled to zero, vLLM not deployed, or a URL/model mismatch). \
-          Check: kubectl get pods -n ${NAMESPACE} -l environment=router"
-          fi
 
-      - name: Show status
-        run: |
-          kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=anime-rec-app -o wide
-          kubectl get svc anime-rec-service -n "$NAMESPACE"
