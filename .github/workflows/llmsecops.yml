@@ -1,9 +1,12 @@
 name: LLMSecOps
 
-# One pipeline. Scans the app running on GKE — whatever image is deployed.
-# The app Deployment serves Streamlit (no HTTP API to inject into), so we stand
-# up a short-lived /recommend endpoint FROM THE SAME live image, scan it with
-# promptfoo (CyberSecEval, model layer) + garak (app layer), then tear it down.
+# One pipeline, one stage per scanner. Each stage runs the SAME security/*/run.sh
+# used locally, so CI and local never drift.
+#
+#   promptfoo  model   CyberSecEval injection benchmark vs the vLLM router
+#   garak      app     probes the live image's /recommend (RAG + prompt + LLM)
+#   llmmap     model   fingerprints the router (catches model substitution)
+#   ps-fuzz    prompt  scores the system prompt's resilience (Groq)
 on:
   workflow_dispatch:
     inputs:
@@ -33,6 +36,9 @@ jobs:
     environment: production          # GROQ_API_KEY + WIF secrets
     steps:
       - uses: actions/checkout@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
 
       - name: Authenticate to Google Cloud (WIF)
         uses: google-github-actions/auth@v3
@@ -52,7 +58,10 @@ jobs:
           curl -fsSLo /tmp/kubectl "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
           sudo install /tmp/kubectl /usr/local/bin/kubectl
 
-      # ---- stand up a /recommend endpoint from whatever image the app runs ----
+      # run.sh scripts source ./.env for GROQ_API_KEY, exactly as they do locally
+      - name: Write .env
+        run: echo "GROQ_API_KEY=${{ secrets.GROQ_API_KEY }}" > .env
+
       - name: Deploy ephemeral scan target
         run: |
           IMG=$(kubectl get deploy "$APP_DEPLOY" -n "$NS" \
@@ -72,10 +81,8 @@ jobs:
             containers:
               - name: app
                 image: ${IMG}
-                # the app's own FastAPI endpoint (baked into the image) — no wrapper/ConfigMap
                 command: ["uvicorn", "app.api:app", "--host", "0.0.0.0", "--port", "${APP_PORT}"]
                 env:
-                  # match the real app's config: it talks to the in-cluster vLLM router
                   - { name: LLM_PROVIDER, value: "vllm" }
                   - { name: VLLM_BASE_URL, value: "http://${ROUTER_SVC}.${NS}.svc.cluster.local:80/v1" }
                   - { name: VLLM_MODEL_NAME, value: "Qwen/Qwen2.5-3B-Instruct" }
@@ -90,22 +97,17 @@ jobs:
 
       - name: Port-forward endpoints
         run: |
-          # the app /recommend endpoint (garak target)
           kubectl port-forward "pod/${SCAN_POD}" ${APP_PORT}:${APP_PORT} -n "$NS" > /tmp/pf-app.log 2>&1 &
-          # the vLLM router (promptfoo cloud-vllm target)
           kubectl port-forward "svc/${ROUTER_SVC}" 8000:80 -n "$NS" > /tmp/pf-router.log 2>&1 &
           for i in $(seq 1 30); do
             curl -sf -X POST "http://localhost:${APP_PORT}/recommend" \
               -H 'Content-Type: application/json' -d '{"prompt":"ping"}' >/dev/null && break || sleep 3
           done
-          curl -sf http://localhost:8000/v1/models >/dev/null || echo "router not ready (promptfoo may fail)"
+          curl -sf http://localhost:8000/v1/models >/dev/null || echo "router not ready (promptfoo/llmmap may fail)"
 
-      # ---- promptfoo — CyberSecEval vs the model behind the app (router) ----
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-
-      - name: Promptfoo CyberSecEval (model layer)
+      # ---- scan 1/4: promptfoo — CyberSecEval vs the model behind the app ----
+      - name: Promptfoo — CyberSecEval (model layer)
+        continue-on-error: true
         working-directory: security/promptfoo/cyberseceval
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}      # judge
@@ -120,8 +122,9 @@ jobs:
             -o reports/promptfoo.html \
             -o reports/promptfoo.json
 
-      # ---- garak — vs the deployed app (/recommend) ----
-      - name: Garak (app layer)
+      # ---- scan 2/4: garak — vs the deployed app (/recommend) ----
+      - name: Garak — probes (app layer)
+        continue-on-error: true
         env:
           PROBES: ${{ inputs.garak_probes }}
           APP_URL: http://localhost:8600/recommend
@@ -130,6 +133,29 @@ jobs:
           /tmp/garakvenv/bin/pip install -q -U pip garak
           source /tmp/garakvenv/bin/activate
           security/garak/run.sh app
+
+      # ---- scan 3/4: llmmap — fingerprint the router (model substitution) ----
+      - name: LLMmap — fingerprint (model layer)
+        continue-on-error: true
+        env:
+          CLOUD_BASE_URL: http://localhost:8000/v1
+        run: |
+          git clone --depth 1 https://github.com/pasquini-dario/LLMmap.git security/llmmap/LLMmap
+          python3 -m venv /tmp/llmmapvenv
+          /tmp/llmmapvenv/bin/pip install -q -U pip
+          /tmp/llmmapvenv/bin/pip install -q -r security/llmmap/LLMmap/requirements.txt
+          source /tmp/llmmapvenv/bin/activate
+          mkdir -p security/llmmap/reports
+          security/llmmap/run.sh cloud 2>&1 | tee security/llmmap/reports/llmmap-cloud.txt
+
+      # ---- scan 4/4: ps-fuzz — system-prompt resilience (Groq) ----
+      - name: ps-fuzz — system prompt (prompt layer)
+        continue-on-error: true
+        run: |
+          python3 -m venv /tmp/psfuzzvenv
+          /tmp/psfuzzvenv/bin/pip install -q -U pip prompt-security-fuzzer
+          source /tmp/psfuzzvenv/bin/activate
+          security/ps-fuzz/run.sh
 
       # ---- report ----
       - name: Job summary
@@ -157,6 +183,12 @@ jobs:
                   out += ["## Garak — app (RAG /recommend)", "",
                           "| resisted | total | resist rate |", "|---|---|---|",
                           f"| {passed} | {total} | {passed/total*100:.1f}% |", ""]
+          for f in glob.glob("security/llmmap/reports/llmmap-*.txt"):
+              tail = [l.rstrip() for l in open(f) if l.strip()][-6:]
+              out += ["## LLMmap — router fingerprint (model)", "", "```", *tail, "```", ""]
+          for f in sorted(glob.glob("security/ps-fuzz/reports/psfuzz-*.txt")):
+              tail = [l.rstrip() for l in open(f) if l.strip()][-15:]
+              out += ["## ps-fuzz — system prompt", "", "```", *tail, "```", ""]
           summary = os.environ.get("GITHUB_STEP_SUMMARY")
           if summary and out: open(summary, "a").write("\n".join(out) + "\n")
           print("\n".join(out) or "no reports parsed")
@@ -170,8 +202,12 @@ jobs:
           path: |
             security/promptfoo/cyberseceval/reports/
             security/garak/reports/
+            security/llmmap/reports/
+            security/ps-fuzz/reports/
           if-no-files-found: ignore
 
       - name: Tear down scan target
         if: always()
-        run: kubectl delete pod "${SCAN_POD}" -n "$NS" --ignore-not-found
+        run: |
+          kubectl delete pod "${SCAN_POD}" -n "$NS" --ignore-not-found
+          rm -f .env
