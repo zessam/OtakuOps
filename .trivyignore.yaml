@@ -1,0 +1,33 @@
+# Trivy ignore file — TEMPORARY suppressions for the app image gate.
+#
+# Applied ONLY to the `Trivy gate` steps in app-deploy.yml, never to the SARIF
+# steps: these CVEs still upload to the Security tab, they just stop blocking the
+# deploy. Every entry needs an expiry — once it passes, the gate fails again and
+# forces a re-review rather than letting the bypass rot into a permanent hole.
+#
+# Check whether these are still needed with:
+#   trivy image --severity HIGH,CRITICAL --ignore-unfixed <image>
+
+vulnerabilities:
+  # All three are starlette, pulled in transitively by fastapi==0.111.0, which
+  # pins starlette<0.38.0 — so none of the fixed versions (0.40.0 / 1.1.0 / 1.3.1)
+  # are reachable without bumping fastapi itself.
+  #
+  # Not reachable in the deployed container: fastapi/starlette are imported only by
+  # app/api.py (the garak REST target, run by hand for red-teaming). The image's CMD
+  # is `streamlit run app/app.py`, and k8s/app/deployment.yaml serves only :8501, so
+  # no starlette code path is ever executed in the pod these CVEs are gating.
+  #
+  # Real fix: bump fastapi (>=0.115 for starlette 0.40), or drop fastapi+uvicorn from
+  # requirements.txt and give app/api.py its own scanning-only image.
+  - id: CVE-2024-47874
+    statement: "starlette DoS via multipart/form-data. Unreachable: no starlette on the Streamlit serving path; blocked by the fastapi==0.111.0 pin."
+    expired_at: 2026-10-16
+
+  - id: CVE-2026-48818
+    statement: "starlette SSRF/NTLM credential theft via UNC paths in StaticFiles. Unreachable: the app mounts no StaticFiles and does not run starlette."
+    expired_at: 2026-10-16
+
+  - id: CVE-2026-54283
+    statement: "starlette request.form() limits ignored for x-www-form-urlencoded, enabling DoS. Unreachable: no starlette form handling on the serving path."
+    expired_at: 2026-10-16
