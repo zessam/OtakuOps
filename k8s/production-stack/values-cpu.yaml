@@ -1,13 +1,4 @@
-# ---------------------------------------------------------------------------
-# vLLM production-stack — CPU-only values, tailored to the anime-recommender
-# GKE cluster (serve pool = e2-highmem-4, tainted dedicated=vllm, label workload=vllm).
-#
-# The upstream chart is GPU-first. Every line below marked [CPU] is a change
-# from the GPU defaults that makes it run on CPU nodes.
-#
-#   helm repo add vllm https://vllm-project.github.io/production-stack
-#   helm install vllm vllm/vllm-stack -f values-cpu.yaml
-# ---------------------------------------------------------------------------
+
 
 servingEngineSpec:
   runtimeClassName: "" # [CPU] default is "nvidia"; empty = schedule on normal (CPU) nodes
